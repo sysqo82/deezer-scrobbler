@@ -1,0 +1,7 @@
+.gradle/
+build/
+local.properties
+.idea/
+MediaBridge/bin/
+MediaBridge/obj/
+*.log
