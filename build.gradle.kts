@@ -8,7 +8,7 @@ plugins {
 }
 
 group = "com.deezerscrobbler"
-version = "1.0.5"
+version = "1.0.10"
 
 repositories {
     mavenCentral()
@@ -37,6 +37,34 @@ dependencies {
     testImplementation(kotlin("test"))
 }
 
+val generateTelemetryProperties = tasks.register("generateTelemetryProperties") {
+    val outputDir = layout.buildDirectory.dir("generated/resources/telemetry")
+    outputs.dir(outputDir)
+    doLast {
+        val key = providers.environmentVariable("TELEMETRY_KEY").orNull
+            ?: providers.gradleProperty("TELEMETRY_KEY").orNull
+            ?: ""
+        val url = providers.environmentVariable("TELEMETRY_URL").orNull
+            ?: providers.gradleProperty("TELEMETRY_URL").orNull
+            ?: "https://telemetry.lockpc.co.uk"
+        val service = providers.environmentVariable("TELEMETRY_SERVICE").orNull
+            ?: providers.gradleProperty("TELEMETRY_SERVICE").orNull
+            ?: "deezer-scrobbler"
+
+        val propFile = outputDir.get().file("telemetry.properties").asFile
+        propFile.parentFile.mkdirs()
+        propFile.writeText("TELEMETRY_KEY=$key\nTELEMETRY_URL=$url\nTELEMETRY_SERVICE=$service\n")
+    }
+}
+
+kotlin.sourceSets.main {
+    resources.srcDir(layout.buildDirectory.dir("generated/resources/telemetry"))
+}
+
+tasks.named("processResources") {
+    dependsOn(generateTelemetryProperties)
+}
+
 compose.desktop {
     application {
         mainClass = "com.deezerscrobbler.MainKt"
@@ -46,7 +74,7 @@ compose.desktop {
                 TargetFormat.Exe
             )
             packageName = "DeezerScrobbler"
-            packageVersion = "1.0.5"
+            packageVersion = "1.0.10"
             windows {
                 menuGroup = "Deezer Scrobbler"
                 upgradeUuid = "6d3a9f14-7221-4d1e-84b2-a4f107f9c9b1"

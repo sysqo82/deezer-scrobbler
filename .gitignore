@@ -5,3 +5,5 @@ local.properties
 MediaBridge/bin/
 MediaBridge/obj/
 *.log
+.env
+src/main/resources/telemetry.properties
