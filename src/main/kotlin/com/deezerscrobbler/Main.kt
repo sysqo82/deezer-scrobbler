@@ -9,8 +9,10 @@ import com.deezerscrobbler.util.FileLogger
 import com.deezerscrobbler.viewmodel.MainViewModel
 
 fun main() {
+    val previousHandler = Thread.getDefaultUncaughtExceptionHandler()
     Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
         FileLogger.error("UncaughtException", "Uncaught exception on thread ${thread.name}", throwable)
+        previousHandler?.uncaughtException(thread, throwable)
     }
     FileLogger.info("Main", "Application starting. Logging to ${FileLogger.logFile.absolutePath}")
 

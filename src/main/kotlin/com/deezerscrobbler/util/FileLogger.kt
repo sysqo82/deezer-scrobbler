@@ -1,5 +1,6 @@
 package com.deezerscrobbler.util
 
+import com.deezerscrobbler.config.AppConfigManager
 import java.io.File
 import java.io.FileWriter
 import java.io.PrintWriter
@@ -9,12 +10,16 @@ import java.time.format.DateTimeFormatter
 object FileLogger {
     val logFile: File by lazy {
         val candidates = listOf(
-            File("C:\\deezer-scrobbler.log"),
-            File("C:\\Users\\Public\\deezer-scrobbler.log"),
-            File(System.getProperty("user.home"), "deezer-scrobbler.log")
+            File(AppConfigManager.appDir, "deezer-scrobbler.log"),
+            File(System.getProperty("user.home") ?: ".", "deezer-scrobbler.log"),
+            File("deezer-scrobbler.log")
         )
         for (f in candidates) {
             try {
+                val parentDir = f.parentFile
+                if (parentDir != null && !parentDir.exists()) {
+                    parentDir.mkdirs()
+                }
                 if (!f.exists()) {
                     f.createNewFile()
                 }
@@ -67,6 +72,17 @@ object FileLogger {
             }
         } catch (e: Exception) {
             println("FileLogger error: ${e.message}")
+        }
+
+        try {
+            TelemetryClient.report(
+                level = level,
+                tag = tag,
+                message = message,
+                throwable = throwable
+            )
+        } catch (_: Exception) {
+            // Swallow telemetry reporting errors
         }
     }
 }
