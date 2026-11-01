@@ -37,6 +37,10 @@ gradlew.bat test
   ```cmd
   gradlew.bat packageExe
   ```
+- **Generate `.exe` installer with the api key baked into it
+  ```cmd
+  gradlew packageExe -PTELEMETRY_KEY=tm_API_KEY_GOES_HERE
+  ```
 - **Generate `.msi` installer**:
   ```cmd
   gradlew.bat packageMsi

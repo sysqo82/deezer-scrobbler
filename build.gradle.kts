@@ -8,7 +8,7 @@ plugins {
 }
 
 group = "com.deezerscrobbler"
-version = "1.0.10"
+version = "1.1.7"
 
 repositories {
     mavenCentral()
@@ -40,16 +40,41 @@ dependencies {
 val generateTelemetryProperties = tasks.register("generateTelemetryProperties") {
     val outputDir = layout.buildDirectory.dir("generated/resources/telemetry")
     outputs.dir(outputDir)
+    val dotEnvFile = file(".env")
+    inputs.file(dotEnvFile).optional()
+
     doLast {
-        val key = providers.environmentVariable("TELEMETRY_KEY").orNull
+        var key = providers.environmentVariable("TELEMETRY_KEY").orNull
             ?: providers.gradleProperty("TELEMETRY_KEY").orNull
             ?: ""
-        val url = providers.environmentVariable("TELEMETRY_URL").orNull
+        var url = providers.environmentVariable("TELEMETRY_URL").orNull
             ?: providers.gradleProperty("TELEMETRY_URL").orNull
             ?: "https://telemetry.lockpc.co.uk"
-        val service = providers.environmentVariable("TELEMETRY_SERVICE").orNull
+        var service = providers.environmentVariable("TELEMETRY_SERVICE").orNull
             ?: providers.gradleProperty("TELEMETRY_SERVICE").orNull
             ?: "deezer-scrobbler"
+
+        val envFiles = listOfNotNull(
+            dotEnvFile.takeIf { it.exists() },
+            File(System.getProperty("user.home") ?: "", ".env").takeIf { it.exists() }
+        )
+
+        for (envFile in envFiles) {
+            if (key.isBlank() || url == "https://telemetry.lockpc.co.uk") {
+                envFile.useLines { lines ->
+                    for (line in lines) {
+                        val trimmed = line.trim()
+                        if (trimmed.startsWith("#") || !trimmed.contains("=")) continue
+                        val parts = trimmed.split("=", limit = 2)
+                        val name = parts[0].trim()
+                        val value = parts[1].trim().removeSurrounding("\"", "\"").removeSurrounding("'", "'")
+                        if (name == "TELEMETRY_KEY" && value.isNotBlank() && key.isBlank()) key = value
+                        if (name == "TELEMETRY_URL" && value.isNotBlank()) url = value
+                        if (name == "TELEMETRY_SERVICE" && value.isNotBlank()) service = value
+                    }
+                }
+            }
+        }
 
         val propFile = outputDir.get().file("telemetry.properties").asFile
         propFile.parentFile.mkdirs()
@@ -74,10 +99,11 @@ compose.desktop {
                 TargetFormat.Exe
             )
             packageName = "DeezerScrobbler"
-            packageVersion = "1.0.10"
+            packageVersion = "1.1.7"
             windows {
                 menuGroup = "Deezer Scrobbler"
                 upgradeUuid = "6d3a9f14-7221-4d1e-84b2-a4f107f9c9b1"
+                perUserInstall = false
             }
         }
     }

@@ -74,15 +74,17 @@ object FileLogger {
             println("FileLogger error: ${e.message}")
         }
 
-        try {
-            TelemetryClient.report(
-                level = level,
-                tag = tag,
-                message = message,
-                throwable = throwable
-            )
-        } catch (_: Exception) {
-            // Swallow telemetry reporting errors
+        if (tag != "TelemetryClient") {
+            try {
+                TelemetryClient.report(
+                    level = level,
+                    tag = tag,
+                    message = message,
+                    throwable = throwable
+                )
+            } catch (_: Exception) {
+                // Swallow telemetry reporting errors
+            }
         }
     }
 }
