@@ -20,6 +20,15 @@ object TelemetryClient {
     internal var telemetryUrlOverride: String? = null
     internal var telemetryKeyOverride: String? = null
 
+    init {
+        try {
+            val k = key
+            val u = url
+            val keyStatus = if (k.isNullOrBlank()) "MISSING/BLANK" else "PRESENT (len=${k.length})"
+            println("TelemetryClient: Initialized. URL: $u, Service: $service, Key: $keyStatus")
+        } catch (_: Exception) {}
+    }
+
     val url: String?
         get() {
             telemetryUrlOverride?.let { return it.trimEnd('/') }
@@ -58,7 +67,24 @@ object TelemetryClient {
             val propVal = System.getProperty(name)
             if (!propVal.isNullOrBlank()) return propVal
 
-            val envFiles = listOf(File(".env"), File(AppConfigManager.appDir, ".env"))
+            // Check build-time injected telemetry.properties bundled in app resources FIRST
+            TelemetryClient::class.java.getResourceAsStream("/telemetry.properties")?.use { stream ->
+                val props = Properties()
+                props.load(stream)
+                val propPropVal = props.getProperty(name)
+                if (!propPropVal.isNullOrBlank()) return propPropVal
+            }
+
+            // Fallback to local .env files (e.g. during local development)
+            val userHome = System.getProperty("user.home") ?: ""
+            val envFiles = listOfNotNull(
+                File(".env"),
+                File(AppConfigManager.appDir, ".env"),
+                userHome.takeIf { it.isNotBlank() }?.let { File(it, ".env") },
+                userHome.takeIf { it.isNotBlank() }?.let { File(it, "Desktop\\.env") },
+                userHome.takeIf { it.isNotBlank() }?.let { File(it, "Desktop/.env") }
+            ).distinct()
+
             for (dotEnv in envFiles) {
                 if (dotEnv.exists()) {
                     dotEnv.useLines { lines ->
@@ -73,13 +99,6 @@ object TelemetryClient {
                         }
                     }
                 }
-            }
-
-            TelemetryClient::class.java.getResourceAsStream("/telemetry.properties")?.use { stream ->
-                val props = Properties()
-                props.load(stream)
-                val propVal = props.getProperty(name)
-                if (!propVal.isNullOrBlank()) return propVal
             }
         } catch (_: Exception) {
             // Ignore env read issues
@@ -112,9 +131,14 @@ object TelemetryClient {
         throwable: Throwable? = null,
         extraTags: Map<String, String>? = null,
     ) {
-        val currentKey = key ?: return
-        val currentUrl = url ?: return
-        if (currentKey.isBlank() || currentUrl.isBlank()) return
+        val currentKey = key
+        val currentUrl = url
+        if (currentKey.isNullOrBlank() || currentUrl.isNullOrBlank()) {
+            if (tag != "TelemetryClient") {
+                FileLogger.debug("TelemetryClient", "Telemetry skipped: TELEMETRY_KEY or TELEMETRY_URL is missing/blank (keyPresent=${!currentKey.isNullOrBlank()}, url=$currentUrl)")
+            }
+            return
+        }
 
         try {
             executor.submit {
@@ -193,11 +217,19 @@ object TelemetryClient {
             .post(requestBody)
             .build()
 
-        okHttpClient.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                val errorBody = response.body?.string() ?: ""
-                FileLogger.warn("TelemetryClient", "Telemetry error HTTP ${response.code}: $errorBody (Check service name match and API key)")
+        FileLogger.info("TelemetryClient", "Attempting to send telemetry event to $baseUrl/v1/events [Service: $service, Level: $level, Tag: $tag]")
+
+        try {
+            okHttpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    val errorBody = response.body?.string() ?: ""
+                    FileLogger.warn("TelemetryClient", "Telemetry error HTTP ${response.code}: $errorBody (URL: $baseUrl/v1/events, Service: $service)")
+                } else {
+                    FileLogger.info("TelemetryClient", "Telemetry event successfully accepted by dashboard (${response.code})")
+                }
             }
+        } catch (e: Exception) {
+            FileLogger.error("TelemetryClient", "Telemetry network request failed: ${e.message}", e)
         }
     }
 }
