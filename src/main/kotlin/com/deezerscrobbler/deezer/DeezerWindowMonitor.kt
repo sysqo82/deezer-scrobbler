@@ -28,44 +28,110 @@ class DeezerWindowMonitor {
     }
 
     fun pollDeezerWindow(swapArtistAndTitle: Boolean = false): DetectionResult {
-        // Try GSMTC Windows Media Controls first via MediaBridge
+        // Fast JNA check to see if Deezer.exe process/window exists
+        val jnaResult = pollViaJna(swapArtistAndTitle)
+
+        if (jnaResult.state == PlaybackState.DEEZER_NOT_RUNNING) {
+            // Deezer is not running on the system; skip MediaBridge process execution
+            return jnaResult
+        }
+
+        // Deezer is running! Try GSMTC via MediaBridge for rich metadata (album, playback status)
         val gsmtcResult = pollViaMediaBridge(swapArtistAndTitle)
-        if (gsmtcResult != null) {
+        if (gsmtcResult != null && gsmtcResult.state != PlaybackState.DEEZER_NOT_RUNNING) {
             return gsmtcResult
         }
 
-        // Fallback to JNA process window polling if MediaBridge fails
-        return pollViaJna(swapArtistAndTitle)
+        // Fallback to JNA result if MediaBridge fails or circuit breaker is active
+        return jnaResult
     }
 
     private var lastMediaBridgeOutput: String? = null
+    private var lastUnexpectedOutput: String? = null
     private var lastJnaTitle: String? = null
+    internal var consecutiveTimeouts = 0
+    internal var mediaBridgeDisabledUntil = 0L
+    private val BACKOFF_DURATION_MS = 300_000L // 5 minutes circuit breaker backoff
+    private val MAX_CONSECUTIVE_TIMEOUTS = 2
 
     private fun pollViaMediaBridge(swapArtistAndTitle: Boolean): DetectionResult? {
-        val exe = extractedBridgeFile ?: run {
-            FileLogger.warn("DeezerWindowMonitor", "extractedBridgeFile is null")
-            return null
-        }
-        if (!exe.exists()) {
-            FileLogger.warn("DeezerWindowMonitor", "Bridge file does not exist: ${exe.absolutePath}")
+        val now = System.currentTimeMillis()
+        if (now < mediaBridgeDisabledUntil) {
             return null
         }
 
+        val exe = extractedBridgeFile ?: return null
+        if (!exe.exists()) return null
+
+        val startTime = System.currentTimeMillis()
         return try {
             val process = ProcessBuilder(exe.absolutePath)
                 .redirectErrorStream(true)
                 .start()
 
-            val completed = process.waitFor(2, TimeUnit.SECONDS)
+            val completed = process.waitFor(3, TimeUnit.SECONDS)
+            val durationMs = System.currentTimeMillis() - startTime
+
             if (!completed) {
                 process.destroyForcibly()
-                FileLogger.warn("DeezerWindowMonitor", "MediaBridge process timed out after 2s and was forcibly destroyed")
+                consecutiveTimeouts++
+
+                val meta = mapOf(
+                    "timeout_limit_ms" to "3000",
+                    "execution_duration_ms" to durationMs.toString(),
+                    "consecutive_timeouts" to consecutiveTimeouts.toString(),
+                    "exe_path" to exe.absolutePath,
+                    "circuit_breaker_active" to (consecutiveTimeouts >= MAX_CONSECUTIVE_TIMEOUTS).toString(),
+                    "backoff_duration_ms" to BACKOFF_DURATION_MS.toString(),
+                    "fallback" to "JNA window polling"
+                )
+
+                if (consecutiveTimeouts == 1) {
+                    FileLogger.warn(
+                        "DeezerWindowMonitor",
+                        "MediaBridge process timed out after ${durationMs}ms (limit 3s) and was forcibly destroyed. Falling back to JNA.",
+                        metadata = meta
+                    )
+                } else {
+                    FileLogger.debug(
+                        "DeezerWindowMonitor",
+                        "MediaBridge process timed out (${durationMs}ms, consecutive count: $consecutiveTimeouts)",
+                        metadata = meta
+                    )
+                }
+
+                if (consecutiveTimeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
+                    mediaBridgeDisabledUntil = now + BACKOFF_DURATION_MS
+                    FileLogger.warn(
+                        "DeezerWindowMonitor",
+                        "MediaBridge timed out $consecutiveTimeouts consecutive times; disabling MediaBridge for ${BACKOFF_DURATION_MS / 1000}s circuit breaker backoff.",
+                        metadata = meta
+                    )
+                }
                 return null
             }
 
-            val output = process.inputStream.bufferedReader().readText().trim()
+            if (consecutiveTimeouts > 0) {
+                FileLogger.info(
+                    "DeezerWindowMonitor",
+                    "MediaBridge recovered after $consecutiveTimeouts consecutive timeouts",
+                    metadata = mapOf(
+                        "previous_consecutive_timeouts" to consecutiveTimeouts.toString(),
+                        "execution_duration_ms" to durationMs.toString()
+                    )
+                )
+                consecutiveTimeouts = 0
+            }
+
+            val outputText = process.inputStream.bufferedReader().readText().trim()
+            val lines = outputText.lines()
+            val output = lines.firstOrNull { it.startsWith("DEEZER|") || it == "DEEZER_NOT_FOUND" } ?: outputText
             if (output != lastMediaBridgeOutput) {
-                FileLogger.info("DeezerWindowMonitor", "MediaBridge output changed: '$output'")
+                FileLogger.info(
+                    "DeezerWindowMonitor",
+                    "MediaBridge output changed: '$output'",
+                    metadata = mapOf("output" to output, "duration_ms" to durationMs.toString())
+                )
                 lastMediaBridgeOutput = output
             }
 
@@ -100,12 +166,61 @@ class DeezerWindowMonitor {
                     return DetectionResult(state, trackInfo)
                 }
             } else if (output == "DEEZER_NOT_FOUND") {
-                return DetectionResult(PlaybackState.DEEZER_NOT_RUNNING, null)
+                return null
             }
-            FileLogger.warn("DeezerWindowMonitor", "Unexpected MediaBridge output: '$output'")
+
+            consecutiveTimeouts++
+            val meta = mapOf(
+                "output" to output,
+                "duration_ms" to durationMs.toString(),
+                "consecutive_failures" to consecutiveTimeouts.toString(),
+                "circuit_breaker_active" to (consecutiveTimeouts >= MAX_CONSECUTIVE_TIMEOUTS).toString(),
+                "fallback" to "JNA window polling"
+            )
+
+            if (output != lastUnexpectedOutput) {
+                lastUnexpectedOutput = output
+                FileLogger.warn(
+                    "DeezerWindowMonitor",
+                    "Unexpected MediaBridge output: '$output'",
+                    metadata = meta
+                )
+            } else {
+                FileLogger.debug(
+                    "DeezerWindowMonitor",
+                    "Repeated unexpected MediaBridge output: '$output'",
+                    metadata = meta
+                )
+            }
+
+            if (consecutiveTimeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
+                mediaBridgeDisabledUntil = now + BACKOFF_DURATION_MS
+                FileLogger.warn(
+                    "DeezerWindowMonitor",
+                    "MediaBridge failed $consecutiveTimeouts consecutive times; disabling MediaBridge for ${BACKOFF_DURATION_MS / 1000}s circuit breaker backoff.",
+                    metadata = meta
+                )
+            }
             null
         } catch (e: Exception) {
-            FileLogger.error("DeezerWindowMonitor", "Exception during MediaBridge polling", e)
+            consecutiveTimeouts++
+            if (consecutiveTimeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
+                mediaBridgeDisabledUntil = now + BACKOFF_DURATION_MS
+            }
+            if (consecutiveTimeouts <= 1) {
+                FileLogger.error(
+                    "DeezerWindowMonitor",
+                    "Exception during MediaBridge polling: ${e.message}",
+                    throwable = e,
+                    metadata = mapOf("exe_path" to exe.absolutePath, "fallback" to "JNA window polling")
+                )
+            } else {
+                FileLogger.debug(
+                    "DeezerWindowMonitor",
+                    "Repeated exception during MediaBridge polling: ${e.message}",
+                    metadata = mapOf("exe_path" to exe.absolutePath, "fallback" to "JNA window polling")
+                )
+            }
             null
         }
     }
@@ -116,12 +231,17 @@ class DeezerWindowMonitor {
 
         User32.INSTANCE.EnumWindows({ hwnd, _ ->
             if (User32.INSTANCE.IsWindowVisible(hwnd)) {
-                val processName = getProcessName(hwnd)
-                if (processName.equals("Deezer.exe", ignoreCase = true)) {
-                    val buffer = CharArray(1024)
-                    val length = User32.INSTANCE.GetWindowText(hwnd, buffer, buffer.size)
-                    if (length > 0) {
-                        val title = String(buffer, 0, length).trim()
+                val buffer = CharArray(1024)
+                val length = User32.INSTANCE.GetWindowText(hwnd, buffer, buffer.size)
+                if (length > 0) {
+                    val title = String(buffer, 0, length).trim()
+                    val processName = getProcessName(hwnd)
+                    val isDeezerProcess = processName.equals("Deezer.exe", ignoreCase = true)
+                    val hasDeezerTitle = title.endsWith(" - Deezer", ignoreCase = true) || 
+                                         title.equals("Deezer", ignoreCase = true) || 
+                                         title.startsWith("Deezer - ", ignoreCase = true)
+
+                    if (isDeezerProcess || hasDeezerTitle) {
                         rawWindowTitle = title
                         deezerProcessFound = true
                         return@EnumWindows false
@@ -167,34 +287,68 @@ class DeezerWindowMonitor {
             val stream: InputStream? = javaClass.getResourceAsStream("/bin/MediaBridge.exe")
 
             if (stream != null) {
-                exeFile.outputStream().use { out ->
-                    stream.copyTo(out)
-                }
-                extractedBridgeFile = exeFile
-                FileLogger.info("DeezerWindowMonitor", "Extracted MediaBridge executable from resources to ${exeFile.absolutePath}")
-            } else {
-                // Check if running from dev environment
-                val devFile = File("src/main/resources/bin/MediaBridge.exe")
-                if (devFile.exists()) {
-                    extractedBridgeFile = devFile
-                    FileLogger.info("DeezerWindowMonitor", "Found dev MediaBridge executable at ${devFile.absolutePath}")
-                } else {
-                    FileLogger.warn("DeezerWindowMonitor", "MediaBridge executable not found in resources or dev location")
+                try {
+                    exeFile.outputStream().use { out ->
+                        stream.copyTo(out)
+                    }
+                    extractedBridgeFile = exeFile
+                    FileLogger.info("DeezerWindowMonitor", "Extracted MediaBridge executable from resources to ${exeFile.absolutePath}")
+                    return
+                } catch (e: Exception) {
+                    if (exeFile.exists() && exeFile.length() > 0) {
+                        extractedBridgeFile = exeFile
+                        FileLogger.info("DeezerWindowMonitor", "Reusing existing MediaBridge executable at ${exeFile.absolutePath}")
+                        return
+                    }
                 }
             }
+
+            // Check dev file location
+            val devFile = File("src/main/resources/bin/MediaBridge.exe")
+            if (devFile.exists()) {
+                extractedBridgeFile = devFile
+                FileLogger.info("DeezerWindowMonitor", "Found dev MediaBridge executable at ${devFile.absolutePath}")
+                return
+            }
+
+            // Check existing temp file location
+            if (exeFile.exists() && exeFile.length() > 0) {
+                extractedBridgeFile = exeFile
+                FileLogger.info("DeezerWindowMonitor", "Found existing MediaBridge executable in temp directory at ${exeFile.absolutePath}")
+                return
+            }
+
+            FileLogger.warn(
+                "DeezerWindowMonitor",
+                "MediaBridge executable not found in resources, dev location, or temp directory",
+                metadata = mapOf("fallback" to "JNA window polling")
+            )
         } catch (e: Exception) {
-            FileLogger.error("DeezerWindowMonitor", "Failed to extract MediaBridge executable", e)
+            FileLogger.error(
+                "DeezerWindowMonitor",
+                "Failed to extract MediaBridge executable: ${e.message}",
+                throwable = e,
+                metadata = mapOf("target_dir" to System.getProperty("java.io.tmpdir"), "fallback" to "JNA window polling")
+            )
         }
     }
 
     private fun getProcessName(hwnd: HWND): String {
         val pidRef = IntByReference()
         User32.INSTANCE.GetWindowThreadProcessId(hwnd, pidRef)
-        val process = Kernel32.INSTANCE.OpenProcess(
+        var process = Kernel32.INSTANCE.OpenProcess(
             WinNT.PROCESS_QUERY_INFORMATION or WinNT.PROCESS_VM_READ,
             false,
             pidRef.value
-        ) ?: return ""
+        )
+        if (process == null) {
+            process = Kernel32.INSTANCE.OpenProcess(
+                0x1000, // PROCESS_QUERY_LIMITED_INFORMATION
+                false,
+                pidRef.value
+            )
+        }
+        if (process == null) return ""
 
         return try {
             val buffer = CharArray(1024)

@@ -242,7 +242,13 @@ class MainViewModel {
                         FileLogger.info("MainViewModel", "NowPlaying update successful for '${newTrack.displayTitle}'")
                         _uiState.value = _uiState.value.copy(isNowPlayingSent = true)
                     } else {
-                        FileLogger.warn("MainViewModel", "NowPlaying update failed for '${newTrack.displayTitle}': ${npResult.exceptionOrNull()?.message}")
+                        val err = npResult.exceptionOrNull()?.message ?: "unknown"
+                        FileLogger.warn(
+                            "MainViewModel",
+                            "NowPlaying update failed for '${newTrack.displayTitle}': $err",
+                            throwable = npResult.exceptionOrNull(),
+                            metadata = mapOf("track" to newTrack.displayTitle, "artist" to newTrack.artist, "error" to err)
+                        )
                     }
                 }
             } else {
@@ -297,7 +303,11 @@ class MainViewModel {
                 _uiState.value = _uiState.value.copy(pendingQueueCount = scrobbleQueue.size())
                 addLog("Not authenticated. Queued scrobble: ${track.displayTitle}", ScrobbleLogType.QUEUED_OFFLINE)
             } else {
-                FileLogger.warn("MainViewModel", "Not authenticated and offline queue disabled. Scrobble dropped for '${track.displayTitle}'")
+                FileLogger.warn(
+                    "MainViewModel",
+                    "Not authenticated and offline queue disabled. Scrobble dropped for '${track.displayTitle}'",
+                    metadata = mapOf("track" to track.displayTitle, "artist" to track.artist, "reason" to "offline_queue_disabled")
+                )
             }
             return
         }
@@ -314,7 +324,12 @@ class MainViewModel {
             addLog("Scrobbled: ${track.displayTitle}", ScrobbleLogType.SCROBBLED)
         } else {
             val errorMsg = result.exceptionOrNull()?.localizedMessage ?: "Unknown error"
-            FileLogger.warn("MainViewModel", "Scrobble failed for '${track.displayTitle}': $errorMsg")
+            FileLogger.warn(
+                "MainViewModel",
+                "Scrobble failed for '${track.displayTitle}': $errorMsg",
+                throwable = result.exceptionOrNull(),
+                metadata = mapOf("track" to track.displayTitle, "artist" to track.artist, "error" to errorMsg)
+            )
             if (config.enableOfflineQueue) {
                 scrobbleQueue.enqueue(
                     PendingScrobble(

@@ -36,30 +36,31 @@ object FileLogger {
     private val dateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS")
 
     @Synchronized
-    fun info(tag: String, message: String) {
-        log("INFO", tag, message, null)
+    fun info(tag: String, message: String, metadata: Map<String, String>? = null) {
+        log("INFO", tag, message, null, metadata)
     }
 
     @Synchronized
-    fun warn(tag: String, message: String, throwable: Throwable? = null) {
-        log("WARN", tag, message, throwable)
+    fun warn(tag: String, message: String, throwable: Throwable? = null, metadata: Map<String, String>? = null) {
+        log("WARN", tag, message, throwable, metadata)
     }
 
     @Synchronized
-    fun error(tag: String, message: String, throwable: Throwable? = null) {
-        log("ERROR", tag, message, throwable)
+    fun error(tag: String, message: String, throwable: Throwable? = null, metadata: Map<String, String>? = null) {
+        log("ERROR", tag, message, throwable, metadata)
     }
 
     @Synchronized
-    fun debug(tag: String, message: String) {
-        log("DEBUG", tag, message, null)
+    fun debug(tag: String, message: String, metadata: Map<String, String>? = null) {
+        log("DEBUG", tag, message, null, metadata)
     }
 
     @Synchronized
-    private fun log(level: String, tag: String, message: String, throwable: Throwable?) {
+    private fun log(level: String, tag: String, message: String, throwable: Throwable?, metadata: Map<String, String>?) {
         val timestamp = LocalDateTime.now().format(dateTimeFormatter)
         val threadName = Thread.currentThread().name
-        val formattedMsg = "[$timestamp] [$threadName] [$level] [$tag] $message"
+        val metaSuffix = if (metadata.isNullOrEmpty()) "" else " | metadata=$metadata"
+        val formattedMsg = "[$timestamp] [$threadName] [$level] [$tag] $message$metaSuffix"
         println(formattedMsg)
 
         try {
@@ -80,7 +81,8 @@ object FileLogger {
                     level = level,
                     tag = tag,
                     message = message,
-                    throwable = throwable
+                    throwable = throwable,
+                    metadata = metadata
                 )
             } catch (_: Exception) {
                 // Swallow telemetry reporting errors
