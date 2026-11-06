@@ -64,7 +64,7 @@ class LastFmClient(
                 Result.success(token)
             }
         } catch (e: Exception) {
-            FileLogger.error("LastFmClient", "fetchRequestToken failed", e)
+            FileLogger.error("LastFmClient", "fetchRequestToken failed: ${e.message}", throwable = e, metadata = mapOf("action" to "fetchRequestToken"))
             Result.failure(e)
         }
     }
@@ -112,7 +112,7 @@ class LastFmClient(
                 Result.success(Pair(key, username))
             }
         } catch (e: Exception) {
-            FileLogger.error("LastFmClient", "fetchSessionKey failed", e)
+            FileLogger.error("LastFmClient", "fetchSessionKey failed: ${e.message}", throwable = e, metadata = mapOf("action" to "fetchSessionKey"))
             Result.failure(e)
         }
     }
@@ -123,7 +123,11 @@ class LastFmClient(
     fun updateNowPlaying(artist: String, track: String, album: String? = null): Result<Unit> {
         if (apiKey.isBlank() || sessionKey.isBlank()) {
             val err = "Last.fm not configured or missing session key (apiKey blank: ${apiKey.isBlank()}, sessionKey blank: ${sessionKey.isBlank()})"
-            FileLogger.warn("LastFmClient", "updateNowPlaying aborted: $err")
+            FileLogger.warn(
+                "LastFmClient",
+                "updateNowPlaying aborted: $err",
+                metadata = mapOf("artist" to artist, "track" to track, "reason" to "missing_credentials")
+            )
             return Result.failure(IllegalStateException(err))
         }
 
@@ -162,13 +166,23 @@ class LastFmClient(
                     Result.success(Unit)
                 } else {
                     val ex = Exception("Last.fm NowPlaying failed (HTTP ${response.code}): $body")
-                    FileLogger.warn("LastFmClient", ex.message!!)
+                    FileLogger.warn(
+                        "LastFmClient",
+                        ex.message!!,
+                        throwable = ex,
+                        metadata = mapOf("artist" to artist, "track" to track, "http_status" to response.code.toString(), "duration_ms" to duration.toString(), "response_body" to body)
+                    )
                     Result.failure(ex)
                 }
             }
         } catch (e: Exception) {
             val duration = System.currentTimeMillis() - startTime
-            FileLogger.error("LastFmClient", "updateNowPlaying network exception after ${duration}ms", e)
+            FileLogger.error(
+                "LastFmClient",
+                "updateNowPlaying network exception after ${duration}ms",
+                throwable = e,
+                metadata = mapOf("artist" to artist, "track" to track, "duration_ms" to duration.toString())
+            )
             Result.failure(e)
         }
     }
@@ -179,7 +193,11 @@ class LastFmClient(
     fun scrobble(artist: String, track: String, timestampSeconds: Long, album: String? = null): Result<Unit> {
         if (apiKey.isBlank() || sessionKey.isBlank()) {
             val err = "Last.fm not configured or missing session key (apiKey blank: ${apiKey.isBlank()}, sessionKey blank: ${sessionKey.isBlank()})"
-            FileLogger.warn("LastFmClient", "scrobble aborted: $err")
+            FileLogger.warn(
+                "LastFmClient",
+                "scrobble aborted: $err",
+                metadata = mapOf("artist" to artist, "track" to track, "timestamp" to timestampSeconds.toString(), "reason" to "missing_credentials")
+            )
             return Result.failure(IllegalStateException(err))
         }
 
@@ -219,13 +237,23 @@ class LastFmClient(
                     Result.success(Unit)
                 } else {
                     val ex = Exception("Last.fm Scrobble failed (HTTP ${response.code}): $body")
-                    FileLogger.warn("LastFmClient", ex.message!!)
+                    FileLogger.warn(
+                        "LastFmClient",
+                        ex.message!!,
+                        throwable = ex,
+                        metadata = mapOf("artist" to artist, "track" to track, "timestamp" to timestampSeconds.toString(), "http_status" to response.code.toString(), "duration_ms" to duration.toString(), "response_body" to body)
+                    )
                     Result.failure(ex)
                 }
             }
         } catch (e: Exception) {
             val duration = System.currentTimeMillis() - startTime
-            FileLogger.error("LastFmClient", "scrobble network exception after ${duration}ms", e)
+            FileLogger.error(
+                "LastFmClient",
+                "scrobble network exception after ${duration}ms",
+                throwable = e,
+                metadata = mapOf("artist" to artist, "track" to track, "timestamp" to timestampSeconds.toString(), "duration_ms" to duration.toString())
+            )
             Result.failure(e)
         }
     }

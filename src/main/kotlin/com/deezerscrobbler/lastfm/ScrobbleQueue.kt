@@ -52,7 +52,13 @@ class ScrobbleQueue {
                 successCount++
                 FileLogger.info("ScrobbleQueue", "Offline scrobble success: ${pending.artist} - ${pending.title}")
             } else {
-                FileLogger.warn("ScrobbleQueue", "Offline scrobble failed for ${pending.artist} - ${pending.title}: ${result.exceptionOrNull()?.message}")
+                val errMsg = result.exceptionOrNull()?.message
+                FileLogger.warn(
+                    "ScrobbleQueue",
+                    "Offline scrobble failed for ${pending.artist} - ${pending.title}: $errMsg",
+                    throwable = result.exceptionOrNull(),
+                    metadata = mapOf("artist" to pending.artist, "title" to pending.title, "queue_size" to queue.size.toString(), "error" to (errMsg ?: "unknown"))
+                )
                 // Stop on first failure (network down or auth issue)
                 break
             }
@@ -82,7 +88,7 @@ class ScrobbleQueue {
                 FileLogger.info("ScrobbleQueue", "Loaded ${queue.size} items from offline queue file")
             }
         } catch (e: Exception) {
-            FileLogger.error("ScrobbleQueue", "Failed to load queue file", e)
+            FileLogger.error("ScrobbleQueue", "Failed to load queue file: ${e.message}", throwable = e, metadata = mapOf("queue_file" to queueFile.absolutePath))
         }
     }
 
@@ -90,7 +96,7 @@ class ScrobbleQueue {
         try {
             queueFile.writeText(json.encodeToString(queue))
         } catch (e: Exception) {
-            FileLogger.error("ScrobbleQueue", "Failed to save queue file", e)
+            FileLogger.error("ScrobbleQueue", "Failed to save queue file: ${e.message}", throwable = e, metadata = mapOf("queue_file" to queueFile.absolutePath))
         }
     }
 }

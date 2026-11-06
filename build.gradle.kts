@@ -7,8 +7,12 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization") version "2.0.0"
 }
 
+kotlin {
+    jvmToolchain(17)
+}
+
 group = "com.deezerscrobbler"
-version = "1.1.7"
+version = "1.3.9"
 
 repositories {
     mavenCentral()
@@ -78,7 +82,7 @@ val generateTelemetryProperties = tasks.register("generateTelemetryProperties") 
 
         val propFile = outputDir.get().file("telemetry.properties").asFile
         propFile.parentFile.mkdirs()
-        propFile.writeText("TELEMETRY_KEY=$key\nTELEMETRY_URL=$url\nTELEMETRY_SERVICE=$service\n")
+        propFile.writeText("TELEMETRY_KEY=$key\nTELEMETRY_URL=$url\nTELEMETRY_SERVICE=$service\nAPP_VERSION=${project.version}\n")
     }
 }
 
@@ -93,13 +97,16 @@ tasks.named("processResources") {
 compose.desktop {
     application {
         mainClass = "com.deezerscrobbler.MainKt"
+        buildTypes.release.proguard {
+            isEnabled = false
+        }
         nativeDistributions {
             targetFormats(
                 TargetFormat.Msi,
                 TargetFormat.Exe
             )
             packageName = "DeezerScrobbler"
-            packageVersion = "1.1.7"
+            packageVersion = "1.3.9"
             windows {
                 menuGroup = "Deezer Scrobbler"
                 upgradeUuid = "6d3a9f14-7221-4d1e-84b2-a4f107f9c9b1"

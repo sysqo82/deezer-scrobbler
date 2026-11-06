@@ -37,4 +37,17 @@ class DeezerWindowMonitorTest {
         assertNull(monitor.parseTrackTitle("Deezer", swapArtistAndTitle = false))
         assertNull(monitor.parseTrackTitle(" - ", swapArtistAndTitle = false))
     }
+
+    @Test
+    fun testCircuitBreakerState() {
+        assertEquals(0, monitor.consecutiveTimeouts)
+        assertEquals(0L, monitor.mediaBridgeDisabledUntil)
+
+        monitor.consecutiveTimeouts = 2
+        monitor.mediaBridgeDisabledUntil = System.currentTimeMillis() + 30_000L
+
+        // pollDeezerWindow should complete via JNA without throwing when circuit breaker is active
+        val result = monitor.pollDeezerWindow()
+        assertNotNull(result)
+    }
 }

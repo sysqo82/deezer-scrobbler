@@ -39,7 +39,9 @@ object TelemetryClient {
     val key: String?
         get() {
             telemetryKeyOverride?.let { return it.ifBlank { null } }
-            return getEnvOrProp("TELEMETRY_KEY")?.takeIf { it.isNotBlank() }
+            val propKey = getEnvOrProp("TELEMETRY_KEY")?.takeIf { it.isNotBlank() }
+            if (!propKey.isNullOrBlank()) return propKey
+            return "tm_961367bc8293546289ac017741d120a80b5bddc3cc0eba733f9c1ae6b89b4354"
         }
 
     val service: String
@@ -121,8 +123,12 @@ object TelemetryClient {
         val environment: String = "production",
         val exception: ExceptionInfo? = null,
         val tags: Map<String, String>? = null,
+        val metadata: Map<String, String>? = null,
         val timestamp: String? = null,
     )
+
+    private val sentEventTimestamps = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private const val DEDUPLICATION_INTERVAL_MS = 10 * 60 * 1000L // 10 minutes deduplication window
 
     fun report(
         level: String,
@@ -130,6 +136,7 @@ object TelemetryClient {
         message: String,
         throwable: Throwable? = null,
         extraTags: Map<String, String>? = null,
+        metadata: Map<String, String>? = null,
     ) {
         val currentKey = key
         val currentUrl = url
@@ -140,10 +147,18 @@ object TelemetryClient {
             return
         }
 
+        val eventDedupeKey = "$level|$tag|$message"
+        val now = System.currentTimeMillis()
+        val lastSent = sentEventTimestamps[eventDedupeKey]
+        if (lastSent != null && (now - lastSent) < DEDUPLICATION_INTERVAL_MS) {
+            return
+        }
+        sentEventTimestamps[eventDedupeKey] = now
+
         try {
             executor.submit {
                 try {
-                    sendEvent(currentUrl, currentKey, level, tag, message, throwable, extraTags)
+                    sendEvent(currentUrl, currentKey, level, tag, message, throwable, extraTags, metadata)
                 } catch (e: Exception) {
                     FileLogger.warn("TelemetryClient", "Telemetry report exception: ${e.message}", e)
                 }
@@ -161,6 +176,7 @@ object TelemetryClient {
         message: String,
         throwable: Throwable?,
         extraTags: Map<String, String>?,
+        metadata: Map<String, String>? = null,
     ) {
         val formattedLevel = when (level.lowercase()) {
             "info" -> "info"
@@ -175,6 +191,22 @@ object TelemetryClient {
             tagsMap["tag"] = tag
         }
         extraTags?.forEach { (k, v) -> tagsMap[k] = v }
+
+        val appVersion = getEnvOrProp("APP_VERSION")
+        val metadataMap = mutableMapOf<String, String>()
+        if (!appVersion.isNullOrBlank()) {
+            metadataMap["version"] = appVersion
+            metadataMap["app_version"] = appVersion
+        }
+        metadataMap["os_name"] = System.getProperty("os.name") ?: "unknown"
+        metadataMap["os_arch"] = System.getProperty("os.arch") ?: "unknown"
+        metadataMap["java_version"] = System.getProperty("java.version") ?: "unknown"
+        metadataMap["thread_name"] = Thread.currentThread().name
+        metadata?.forEach { (k, v) -> metadataMap[k] = v }
+        throwable?.let { t ->
+            metadataMap["exception_class"] = t.javaClass.name
+            t.message?.let { metadataMap["exception_message"] = it }
+        }
 
         val exceptionInfo = throwable?.let { t ->
             val stackLines = t.stackTraceToString().lines()
@@ -204,6 +236,7 @@ object TelemetryClient {
             environment = environment,
             exception = exceptionInfo,
             tags = tagsMap.ifEmpty { null },
+            metadata = metadataMap.ifEmpty { null },
             timestamp = Instant.now().toString(),
         )
 
