@@ -16,6 +16,7 @@ import androidx.compose.ui.unit.sp
 import com.deezerscrobbler.model.PlaybackState
 import com.deezerscrobbler.model.ScrobbleLogEntry
 import com.deezerscrobbler.model.ScrobbleLogType
+import com.deezerscrobbler.model.TrackStatus
 import com.deezerscrobbler.viewmodel.MainViewModel
 import com.deezerscrobbler.viewmodel.UiState
 
@@ -138,14 +139,19 @@ private fun CurrentTrackCard(uiState: UiState, viewModel: MainViewModel) {
                     ) {
                         Text("${uiState.playedSeconds}s played", fontSize = 12.sp)
                         Text(
-                            text = when {
-                                uiState.isScrobbled -> "✔ Scrobbled"
-                                uiState.isNowPlayingSent -> "✔ Now Playing sent"
-                                else -> "Scrobbling soon..."
+                            text = when (uiState.trackStatus) {
+                                is TrackStatus.NowPlaying -> "✔ Now Playing"
+                                is TrackStatus.Scrobbling -> "⏳ Scrobbling..."
+                                is TrackStatus.Active -> "✔ Now Playing (Continuous)"
+                                is TrackStatus.Error -> "⚠ Error: ${uiState.trackStatus.message}"
                             },
                             fontSize = 12.sp,
                             fontWeight = FontWeight.SemiBold,
-                            color = if (uiState.isScrobbled) Color(0xFF2E7D32) else MaterialTheme.colorScheme.primary
+                            color = when (uiState.trackStatus) {
+                                is TrackStatus.Error -> Color(0xFFC62828)
+                                is TrackStatus.Scrobbling -> MaterialTheme.colorScheme.tertiary
+                                else -> Color(0xFF2E7D32)
+                            }
                         )
                     }
                 }

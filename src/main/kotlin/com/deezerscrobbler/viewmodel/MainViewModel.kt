@@ -21,8 +21,10 @@ data class UiState(
     val currentTrack: TrackInfo? = null,
     val playbackState: PlaybackState = PlaybackState.IDLE,
     val playedSeconds: Int = 0,
+    val trackStatus: TrackStatus = TrackStatus.NowPlaying,
     val isNowPlayingSent: Boolean = false,
     val isScrobbled: Boolean = false,
+    val isScrobbling: Boolean = false,
     val config: AppConfig = AppConfig(),
     val pendingQueueCount: Int = 0,
     val logs: List<ScrobbleLogEntry> = emptyList(),
@@ -228,31 +230,16 @@ class MainViewModel {
                 currentTrack = newTrack,
                 playbackState = PlaybackState.PLAYING,
                 playedSeconds = 0,
+                trackStatus = TrackStatus.NowPlaying,
                 isNowPlayingSent = false,
-                isScrobbled = false
+                isScrobbled = false,
+                isScrobbling = false
             )
 
             addLog("Now Playing: ${newTrack.displayTitle}", ScrobbleLogType.NOW_PLAYING)
 
             if (currentState.config.isAuthenticated) {
-                FileLogger.info("MainViewModel", "Sending NowPlaying update for '${newTrack.displayTitle}'")
-                scope.launch {
-                    val npResult = lastFmClient.updateNowPlaying(newTrack.artist, newTrack.title, newTrack.album)
-                    if (npResult.isSuccess) {
-                        FileLogger.info("MainViewModel", "NowPlaying update successful for '${newTrack.displayTitle}'")
-                        _uiState.value = _uiState.value.copy(isNowPlayingSent = true)
-                    } else {
-                        val err = npResult.exceptionOrNull()?.message ?: "unknown"
-                        FileLogger.warn(
-                            "MainViewModel",
-                            "NowPlaying update failed for '${newTrack.displayTitle}': $err",
-                            throwable = npResult.exceptionOrNull(),
-                            metadata = mapOf("track" to newTrack.displayTitle, "artist" to newTrack.artist, "error" to err)
-                        )
-                    }
-                }
-            } else {
-                FileLogger.info("MainViewModel", "Skipping NowPlaying update: user not authenticated on Last.fm")
+                sendNowPlayingUpdate(newTrack)
             }
         } else if (newTrack != null) {
             // Same track continuing or resuming from IDLE/PAUSED state
@@ -268,18 +255,39 @@ class MainViewModel {
                 playedSeconds = updatedPlayedSeconds
             )
 
-            // Check scrobble threshold
+            // Continously send / maintain "Now Playing" update periodically (e.g. every 60s) until end of song
+            if (currentState.config.isAuthenticated && updatedPlayedSeconds > 0 && updatedPlayedSeconds % 60 == 0) {
+                sendNowPlayingUpdate(newTrack)
+            }
+
+            // Check scrobble threshold with concurrency protection
             val thresholdSeconds = calculateScrobbleThreshold(newTrack, currentState.config)
             if (updatedPlayedSeconds % 10 == 0 || updatedPlayedSeconds >= thresholdSeconds) {
                 FileLogger.debug("MainViewModel", "Track playback progress: '${newTrack.displayTitle}', playedSeconds: $updatedPlayedSeconds/$thresholdSeconds, isScrobbled: ${currentState.isScrobbled}")
             }
 
-            if (updatedPlayedSeconds >= thresholdSeconds && !_uiState.value.isScrobbled) {
+            if (updatedPlayedSeconds >= thresholdSeconds && !currentState.isScrobbled && !currentState.isScrobbling) {
                 FileLogger.info("MainViewModel", "Scrobble threshold reached ($updatedPlayedSeconds >= $thresholdSeconds seconds) for '${newTrack.displayTitle}'. Triggering scrobble!")
-                _uiState.value = _uiState.value.copy(isScrobbled = true)
+                _uiState.value = currentState.copy(
+                    isScrobbling = true,
+                    trackStatus = TrackStatus.Scrobbling
+                )
                 scope.launch {
                     sendScrobble(newTrack, trackStartTimestamp)
                 }
+            }
+        }
+    }
+
+    private fun sendNowPlayingUpdate(track: TrackInfo) {
+        scope.launch {
+            val npResult = lastFmClient.updateNowPlaying(track.artist, track.title, track.album)
+            if (npResult.isSuccess) {
+                FileLogger.info("MainViewModel", "NowPlaying update successful for '${track.displayTitle}'")
+                _uiState.value = uiState.value.copy(isNowPlayingSent = true)
+            } else {
+                val err = npResult.exceptionOrNull()?.message ?: "unknown"
+                FileLogger.warn("MainViewModel", "NowPlaying update failed: $err")
             }
         }
     }
@@ -300,14 +308,19 @@ class MainViewModel {
                         timestampSeconds = timeToUse
                     )
                 )
-                _uiState.value = _uiState.value.copy(pendingQueueCount = scrobbleQueue.size())
+                _uiState.value = uiState.value.copy(
+                    pendingQueueCount = scrobbleQueue.size(),
+                    isScrobbled = true,
+                    isScrobbling = false,
+                    trackStatus = TrackStatus.Active
+                )
                 addLog("Not authenticated. Queued scrobble: ${track.displayTitle}", ScrobbleLogType.QUEUED_OFFLINE)
             } else {
-                FileLogger.warn(
-                    "MainViewModel",
-                    "Not authenticated and offline queue disabled. Scrobble dropped for '${track.displayTitle}'",
-                    metadata = mapOf("track" to track.displayTitle, "artist" to track.artist, "reason" to "offline_queue_disabled")
+                _uiState.value = uiState.value.copy(
+                    isScrobbling = false,
+                    trackStatus = TrackStatus.Error("Not authenticated")
                 )
+                FileLogger.warn("MainViewModel", "Not authenticated and offline queue disabled.")
             }
             return
         }
@@ -322,14 +335,14 @@ class MainViewModel {
         if (result.isSuccess) {
             FileLogger.info("MainViewModel", "Successfully scrobbled '${track.displayTitle}'")
             addLog("Scrobbled: ${track.displayTitle}", ScrobbleLogType.SCROBBLED)
+            _uiState.value = uiState.value.copy(
+                isScrobbled = true,
+                isScrobbling = false,
+                trackStatus = TrackStatus.Active
+            )
         } else {
             val errorMsg = result.exceptionOrNull()?.localizedMessage ?: "Unknown error"
-            FileLogger.warn(
-                "MainViewModel",
-                "Scrobble failed for '${track.displayTitle}': $errorMsg",
-                throwable = result.exceptionOrNull(),
-                metadata = mapOf("track" to track.displayTitle, "artist" to track.artist, "error" to errorMsg)
-            )
+            FileLogger.warn("MainViewModel", "Scrobble failed: $errorMsg")
             if (config.enableOfflineQueue) {
                 scrobbleQueue.enqueue(
                     PendingScrobble(
@@ -339,9 +352,18 @@ class MainViewModel {
                         timestampSeconds = timeToUse
                     )
                 )
-                _uiState.value = _uiState.value.copy(pendingQueueCount = scrobbleQueue.size())
+                _uiState.value = uiState.value.copy(
+                    pendingQueueCount = scrobbleQueue.size(),
+                    isScrobbled = true,
+                    isScrobbling = false,
+                    trackStatus = TrackStatus.Active
+                )
                 addLog("Network error. Queued scrobble: ${track.displayTitle}", ScrobbleLogType.QUEUED_OFFLINE)
             } else {
+                _uiState.value = uiState.value.copy(
+                    isScrobbling = false,
+                    trackStatus = TrackStatus.Error(errorMsg)
+                )
                 addLog("Failed to scrobble: $errorMsg", ScrobbleLogType.ERROR)
             }
         }

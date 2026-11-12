@@ -162,7 +162,7 @@ class LastFmClient(
                 val body = response.body?.string() ?: ""
                 val duration = System.currentTimeMillis() - startTime
                 FileLogger.info("LastFmClient", "updateNowPlaying HTTP ${response.code} (${duration}ms): $body")
-                if (response.isSuccessful && !body.contains("error")) {
+                if (response.isSuccessful && !body.contains("\"error\":")) {
                     Result.success(Unit)
                 } else {
                     val ex = Exception("Last.fm NowPlaying failed (HTTP ${response.code}): $body")

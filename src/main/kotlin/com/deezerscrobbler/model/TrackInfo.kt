@@ -14,6 +14,13 @@ data class TrackInfo(
     override fun toString(): String = displayTitle
 }
 
+sealed interface TrackStatus {
+    data object NowPlaying : TrackStatus
+    data object Scrobbling : TrackStatus
+    data object Active : TrackStatus
+    data class Error(val message: String) : TrackStatus
+}
+
 enum class PlaybackState {
     PLAYING,
     PAUSED,
