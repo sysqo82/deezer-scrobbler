@@ -12,7 +12,7 @@ kotlin {
 }
 
 group = "com.deezerscrobbler"
-version = "1.3.14"
+version = "1.3.15"
 
 repositories {
     mavenCentral()
@@ -45,7 +45,8 @@ val generateTelemetryProperties = tasks.register("generateTelemetryProperties") 
     val outputDir = layout.buildDirectory.dir("generated/resources/telemetry")
     outputs.dir(outputDir)
     val dotEnvFile = file(".env")
-    inputs.file(dotEnvFile).optional()
+    inputs.files(dotEnvFile) // .env is optional (key may come from env var / Gradle property)
+    outputs.upToDateWhen { false } // always regenerate: the key may come from env vars Gradle doesn't track
 
     doLast {
         var key = providers.environmentVariable("TELEMETRY_KEY").orNull
@@ -94,6 +95,22 @@ tasks.named("processResources") {
     dependsOn(generateTelemetryProperties)
 }
 
+// Release builds must ship with a baked-in telemetry key (from TELEMETRY_KEY env var, Gradle property or .env).
+tasks.matching { it.name.startsWith("package") || it.name.startsWith("createDistributable") || it.name.startsWith("createReleaseDistributable") }.configureEach {
+    doFirst {
+        val props = layout.buildDirectory.file("generated/resources/telemetry/telemetry.properties").get().asFile
+        if (!props.exists() || props.readLines().none { it.startsWith("TELEMETRY_KEY=") && it.length > "TELEMETRY_KEY=".length }) {
+            throw GradleException("TELEMETRY_KEY is missing: set it as an env var, Gradle property or in .env before packaging.")
+        }
+    }
+}
+
+// Tests must never send telemetry to the production dashboard.
+// TelemetryClient reads TELEMETRY_URL from the environment first and skips sending when it isn't an https:// URL.
+tasks.withType<Test> {
+    environment("TELEMETRY_URL", "disabled")
+}
+
 compose.desktop {
     application {
         mainClass = "com.deezerscrobbler.MainKt"
@@ -106,7 +123,7 @@ compose.desktop {
                 TargetFormat.Exe
             )
             packageName = "DeezerScrobbler"
-            packageVersion = "1.3.14"
+            packageVersion = "1.3.15"
             windows {
                 menuGroup = "Deezer Scrobbler"
                 upgradeUuid = "6d3a9f14-7221-4d1e-84b2-a4f107f9c9b1"

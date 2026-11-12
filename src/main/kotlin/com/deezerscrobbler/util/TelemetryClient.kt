@@ -39,9 +39,8 @@ object TelemetryClient {
     val key: String?
         get() {
             telemetryKeyOverride?.let { return it.ifBlank { null } }
-            val propKey = getEnvOrProp("TELEMETRY_KEY")?.takeIf { it.isNotBlank() }
-            if (!propKey.isNullOrBlank()) return propKey
-            return "tm_961367bc8293546289ac017741d120a80b5bddc3cc0eba733f9c1ae6b89b4354"
+            // Baked into /telemetry.properties at build time (see generateTelemetryProperties in build.gradle.kts).
+            return getEnvOrProp("TELEMETRY_KEY")?.takeIf { it.isNotBlank() }
         }
 
     val service: String
