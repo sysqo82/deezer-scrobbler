@@ -12,7 +12,6 @@ import com.sun.jna.platform.win32.WinNT
 import com.sun.jna.ptr.IntByReference
 import java.io.File
 import java.io.InputStream
-import java.util.concurrent.TimeUnit
 
 data class DetectionResult(
     val state: PlaybackState,
@@ -46,187 +45,97 @@ class DeezerWindowMonitor {
         return jnaResult
     }
 
-    private var lastMediaBridgeOutput: String? = null
-    private var lastUnexpectedOutput: String? = null
     private var lastJnaTitle: String? = null
-    internal var consecutiveTimeouts = 0
-    internal var mediaBridgeDisabledUntil = 0L
-    private val BACKOFF_DURATION_MS = 300_000L // 5 minutes circuit breaker backoff
-    private val MAX_CONSECUTIVE_TIMEOUTS = 2
 
-    private fun pollViaMediaBridge(swapArtistAndTitle: Boolean): DetectionResult? {
+    // Long-lived MediaBridge process. It pushes one line per state change; we only read the latest line.
+    // Spawning a bridge per poll (every 2s) flooded the Windows media service in explorer.exe until it stopped responding.
+    private var bridgeProcess: Process? = null
+    @Volatile internal var latestBridgeLine: String? = null
+    internal var bridgeStartCount = 0
+    internal var nextBridgeStartAllowedAt = 0L
+    private val BRIDGE_RESTART_BACKOFF_MS = 300_000L
+    internal var bridgeStarter: () -> Process? = { startBridge() }
+
+    internal fun pollViaMediaBridge(swapArtistAndTitle: Boolean): DetectionResult? {
+        ensureBridgeRunning()
+        val output = latestBridgeLine ?: return null
+        return parseBridgeOutput(output, swapArtistAndTitle)
+    }
+
+    private fun ensureBridgeRunning() {
+        if (bridgeProcess?.isAlive == true) return
         val now = System.currentTimeMillis()
-        if (now < mediaBridgeDisabledUntil) {
-            return null
-        }
+        if (now < nextBridgeStartAllowedAt) return
+        nextBridgeStartAllowedAt = now + BRIDGE_RESTART_BACKOFF_MS
+        latestBridgeLine = null
 
+        val process = try {
+            bridgeStarter() ?: return
+        } catch (e: Exception) {
+            FileLogger.error("DeezerWindowMonitor", "Failed to start MediaBridge: ${e.message}", throwable = e)
+            return
+        }
+        bridgeStartCount++
+        bridgeProcess = process
+        FileLogger.info("DeezerWindowMonitor", "MediaBridge started (start #$bridgeStartCount)")
+
+        Thread({
+            try {
+                process.inputStream.bufferedReader().forEachLine { line ->
+                    val trimmed = line.trim()
+                    if (trimmed.isEmpty()) return@forEachLine
+                    latestBridgeLine = trimmed
+                    FileLogger.info("DeezerWindowMonitor", "MediaBridge output changed: '$trimmed'", metadata = mapOf("output" to trimmed))
+                }
+            } catch (_: Exception) {
+            }
+            latestBridgeLine = null
+            FileLogger.warn("DeezerWindowMonitor", "MediaBridge exited", metadata = mapOf("fallback" to "JNA window polling"))
+        }, "MediaBridge-Reader").apply { isDaemon = true }.start()
+    }
+
+    private fun startBridge(): Process? {
         val exe = extractedBridgeFile ?: return null
         if (!exe.exists()) return null
+        // stdin stays open as a pipe; the bridge exits when it closes (i.e. when this app exits).
+        return ProcessBuilder(exe.absolutePath).redirectErrorStream(true).start()
+    }
 
-        val startTime = System.currentTimeMillis()
-        return try {
-            val process = ProcessBuilder(exe.absolutePath)
-                .redirectErrorStream(true)
-                .start()
+    internal fun parseBridgeOutput(output: String, swapArtistAndTitle: Boolean): DetectionResult? {
+        if (!output.startsWith("DEEZER|")) return null
+        val parts = output.split("|")
+        if (parts.size < 5) return null
 
-            val completed = process.waitFor(3, TimeUnit.SECONDS)
-            val durationMs = System.currentTimeMillis() - startTime
+        var artist = parts[1].trim()
+        var title = parts[2].trim()
+        val album = parts[3].trim().ifBlank { null }
+        val statusStr = parts[4].trim()
 
-            if (!completed) {
-                process.destroyForcibly()
-                consecutiveTimeouts++
-
-                val meta = mapOf(
-                    "timeout_limit_ms" to "3000",
-                    "execution_duration_ms" to durationMs.toString(),
-                    "consecutive_timeouts" to consecutiveTimeouts.toString(),
-                    "exe_path" to exe.absolutePath,
-                    "circuit_breaker_active" to (consecutiveTimeouts >= MAX_CONSECUTIVE_TIMEOUTS).toString(),
-                    "backoff_duration_ms" to BACKOFF_DURATION_MS.toString(),
-                    "fallback" to "JNA window polling"
-                )
-
-                if (consecutiveTimeouts == 1) {
-                    FileLogger.warn(
-                        "DeezerWindowMonitor",
-                        "MediaBridge process timed out after ${durationMs}ms (limit 3s) and was forcibly destroyed. Falling back to JNA.",
-                        metadata = meta
-                    )
-                } else {
-                    FileLogger.debug(
-                        "DeezerWindowMonitor",
-                        "MediaBridge process timed out (${durationMs}ms, consecutive count: $consecutiveTimeouts)",
-                        metadata = meta
-                    )
-                }
-
-                if (consecutiveTimeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
-                    mediaBridgeDisabledUntil = now + BACKOFF_DURATION_MS
-                    FileLogger.warn(
-                        "DeezerWindowMonitor",
-                        "MediaBridge timed out $consecutiveTimeouts consecutive times; disabling MediaBridge for ${BACKOFF_DURATION_MS / 1000}s circuit breaker backoff.",
-                        metadata = meta
-                    )
-                }
-                return null
-            }
-
-            if (consecutiveTimeouts > 0) {
-                FileLogger.info(
-                    "DeezerWindowMonitor",
-                    "MediaBridge recovered after $consecutiveTimeouts consecutive timeouts",
-                    metadata = mapOf(
-                        "previous_consecutive_timeouts" to consecutiveTimeouts.toString(),
-                        "execution_duration_ms" to durationMs.toString()
-                    )
-                )
-                consecutiveTimeouts = 0
-            }
-
-            val outputText = process.inputStream.bufferedReader().readText().trim()
-            val lines = outputText.lines()
-            val output = lines.firstOrNull { it.startsWith("DEEZER|") || it == "DEEZER_NOT_FOUND" } ?: outputText
-            if (output != lastMediaBridgeOutput) {
-                FileLogger.info(
-                    "DeezerWindowMonitor",
-                    "MediaBridge output changed: '$output'",
-                    metadata = mapOf("output" to output, "duration_ms" to durationMs.toString())
-                )
-                lastMediaBridgeOutput = output
-            }
-
-            if (output.startsWith("DEEZER|")) {
-                val parts = output.split("|")
-                if (parts.size >= 5) {
-                    var artist = parts[1].trim()
-                    var title = parts[2].trim()
-                    val album = parts[3].trim().ifBlank { null }
-                    val statusStr = parts[4].trim()
-
-                    if (artist.isBlank() && title.isBlank()) {
-                        return DetectionResult(PlaybackState.IDLE, null)
-                    }
-
-                    if (swapArtistAndTitle) {
-                        val tmp = artist
-                        artist = title
-                        title = tmp
-                    }
-
-                    val state = when {
-                        statusStr.equals("Playing", ignoreCase = true) -> PlaybackState.PLAYING
-                        statusStr.equals("Paused", ignoreCase = true) -> PlaybackState.PAUSED
-                        else -> PlaybackState.IDLE
-                    }
-
-                    val trackInfo = if (artist.isNotBlank() && title.isNotBlank()) {
-                        TrackInfo(artist = artist, title = title, album = album)
-                    } else null
-
-                    return DetectionResult(state, trackInfo)
-                }
-            } else if (output == "DEEZER_NOT_FOUND") {
-                return null
-            }
-
-            consecutiveTimeouts++
-            val meta = mapOf(
-                "output" to output,
-                "duration_ms" to durationMs.toString(),
-                "consecutive_failures" to consecutiveTimeouts.toString(),
-                "circuit_breaker_active" to (consecutiveTimeouts >= MAX_CONSECUTIVE_TIMEOUTS).toString(),
-                "fallback" to "JNA window polling"
-            )
-
-            if (output != lastUnexpectedOutput) {
-                lastUnexpectedOutput = output
-                FileLogger.warn(
-                    "DeezerWindowMonitor",
-                    "Unexpected MediaBridge output: '$output'",
-                    metadata = meta
-                )
-            } else {
-                FileLogger.debug(
-                    "DeezerWindowMonitor",
-                    "Repeated unexpected MediaBridge output: '$output'",
-                    metadata = meta
-                )
-            }
-
-            if (consecutiveTimeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
-                mediaBridgeDisabledUntil = now + BACKOFF_DURATION_MS
-                FileLogger.warn(
-                    "DeezerWindowMonitor",
-                    "MediaBridge failed $consecutiveTimeouts consecutive times; disabling MediaBridge for ${BACKOFF_DURATION_MS / 1000}s circuit breaker backoff.",
-                    metadata = meta
-                )
-            }
-            null
-        } catch (e: Exception) {
-            consecutiveTimeouts++
-            if (consecutiveTimeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
-                mediaBridgeDisabledUntil = now + BACKOFF_DURATION_MS
-            }
-            if (consecutiveTimeouts <= 1) {
-                FileLogger.error(
-                    "DeezerWindowMonitor",
-                    "Exception during MediaBridge polling: ${e.message}",
-                    throwable = e,
-                    metadata = mapOf("exe_path" to exe.absolutePath, "fallback" to "JNA window polling")
-                )
-            } else {
-                FileLogger.debug(
-                    "DeezerWindowMonitor",
-                    "Repeated exception during MediaBridge polling: ${e.message}",
-                    metadata = mapOf("exe_path" to exe.absolutePath, "fallback" to "JNA window polling")
-                )
-            }
-            null
+        if (artist.isBlank() && title.isBlank()) {
+            return DetectionResult(PlaybackState.IDLE, null)
         }
+
+        if (swapArtistAndTitle) {
+            val tmp = artist
+            artist = title
+            title = tmp
+        }
+
+        val state = when {
+            statusStr.equals("Playing", ignoreCase = true) -> PlaybackState.PLAYING
+            statusStr.equals("Paused", ignoreCase = true) -> PlaybackState.PAUSED
+            else -> PlaybackState.IDLE
+        }
+
+        val trackInfo = if (artist.isNotBlank() && title.isNotBlank()) {
+            TrackInfo(artist = artist, title = title, album = album)
+        } else null
+
+        return DetectionResult(state, trackInfo)
     }
 
     private fun pollViaJna(swapArtistAndTitle: Boolean): DetectionResult {
-        var rawWindowTitle: String? = null
+        val candidates = mutableListOf<String>()
         var deezerProcessFound = false
 
         User32.INSTANCE.EnumWindows({ hwnd, _ ->
@@ -242,29 +151,42 @@ class DeezerWindowMonitor {
                                          title.startsWith("Deezer - ", ignoreCase = true)
 
                     if (isDeezerProcess || hasDeezerTitle) {
-                        rawWindowTitle = title
                         deezerProcessFound = true
-                        return@EnumWindows false
+                        if (title.isNotBlank() && !candidates.contains(title)) {
+                            candidates.add(title)
+                        }
                     }
                 }
             }
             true
         }, Pointer.NULL)
 
-        if (!deezerProcessFound || rawWindowTitle.isNullOrBlank()) {
+        if (!deezerProcessFound || candidates.isEmpty()) {
             if (lastJnaTitle != "DEEZER_NOT_RUNNING") {
-                FileLogger.info("DeezerWindowMonitor", "JNA polling: Deezer process not running / no window title")
+                FileLogger.info("DeezerWindowMonitor", "JNA polling: Deezer process not running / no window title found")
                 lastJnaTitle = "DEEZER_NOT_RUNNING"
             }
             return DetectionResult(PlaybackState.DEEZER_NOT_RUNNING, null)
         }
 
+        // Prefer window title containing " - " (track metadata) over plain static "Deezer"
+        val bestTitle = candidates.firstOrNull { it.contains(" - ") && !it.equals("Deezer", ignoreCase = true) && !it.equals("Deezer Scrobbler", ignoreCase = true) }
+            ?: candidates.firstOrNull { !it.equals("Deezer", ignoreCase = true) && !it.equals("Deezer Scrobbler", ignoreCase = true) }
+            ?: candidates.firstOrNull()
+            ?: "Deezer"
+
+        val rawWindowTitle = bestTitle
+
         if (rawWindowTitle != lastJnaTitle) {
-            FileLogger.info("DeezerWindowMonitor", "JNA raw title changed: '$rawWindowTitle'")
+            FileLogger.info(
+                "DeezerWindowMonitor",
+                "JNA evaluated ${candidates.size} Deezer window(s): $candidates -> selected title: '$rawWindowTitle'",
+                metadata = mapOf("candidates_count" to candidates.size.toString(), "selected_title" to rawWindowTitle)
+            )
             lastJnaTitle = rawWindowTitle
         }
 
-        val cleanTitle = cleanTitle(rawWindowTitle!!)
+        val cleanTitle = cleanTitle(rawWindowTitle)
 
         if (cleanTitle.equals("Deezer", ignoreCase = true) || cleanTitle.isBlank()) {
             return DetectionResult(PlaybackState.IDLE, null)

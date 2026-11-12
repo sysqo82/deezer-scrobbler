@@ -175,10 +175,19 @@ class MainViewModel {
         FileLogger.info("MainViewModel", "startMonitoringLoop initiated")
         scope.launch {
             FileLogger.info("MainViewModel", "Monitoring loop coroutine started on thread ${Thread.currentThread().name}")
+            var loopIteration = 0L
             while (isActive) {
+                loopIteration++
                 try {
                     val config = uiState.value.config
                     val result = monitor.pollDeezerWindow(config.swapArtistAndTitle)
+
+                    if (loopIteration % 30L == 0L) {
+                        FileLogger.info(
+                            "MainViewModel",
+                            "Periodic monitor heartbeat: state=${result.state}, track='${result.trackInfo?.displayTitle ?: "none"}', auth=${config.isAuthenticated}, queueSize=${scrobbleQueue.size()}"
+                        )
+                    }
 
                     handleDetectionResult(result)
 
@@ -262,8 +271,17 @@ class MainViewModel {
 
             // Check scrobble threshold with concurrency protection
             val thresholdSeconds = calculateScrobbleThreshold(newTrack, currentState.config)
-            if (updatedPlayedSeconds % 10 == 0 || updatedPlayedSeconds >= thresholdSeconds) {
-                FileLogger.debug("MainViewModel", "Track playback progress: '${newTrack.displayTitle}', playedSeconds: $updatedPlayedSeconds/$thresholdSeconds, isScrobbled: ${currentState.isScrobbled}")
+            if (updatedPlayedSeconds % 30 == 0 || updatedPlayedSeconds >= thresholdSeconds) {
+                FileLogger.info(
+                    "MainViewModel",
+                    "Playback progress for '${newTrack.displayTitle}': $updatedPlayedSeconds/$thresholdSeconds sec (scrobbled=${currentState.isScrobbled}, scrobbling=${currentState.isScrobbling})",
+                    metadata = mapOf(
+                        "track" to newTrack.displayTitle,
+                        "played_seconds" to updatedPlayedSeconds.toString(),
+                        "threshold_seconds" to thresholdSeconds.toString(),
+                        "is_scrobbled" to currentState.isScrobbled.toString()
+                    )
+                )
             }
 
             if (updatedPlayedSeconds >= thresholdSeconds && !currentState.isScrobbled && !currentState.isScrobbling) {
