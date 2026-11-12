@@ -17,8 +17,8 @@
 - Never EVER touch anything out of the scope of fix, feature or refactor code
 - If I ask you to use a skill, you can find them in the `D:\D backup\My Documents\projects\skills` directory. Always refer to that path to read skill instructions.
 - Always increase the version number when writing new code
-- When committing the code and pushing to GitHub, ALWAYS write a comprehensive PR note containing:
+- When committing the code and pushing to GitHub, ALWAYS write a comprehensive commit message and PR notes containing:
   - **Summary**: A high-level overview of the PR purpose.
   - **What Was Changed**: Bulleted breakdown of all new, extracted, or refactored components and logic.
-  - **Dependencies & Version Control**: Bullet points detailing `versionCode`/`versionName` bumps, dependency changes, and Gradle/AGP updates.
+  - **Dependencies & Version Control**: `version` bumps, dependency changes, and Gradle/AGP updates.
   - **Testing & Verification**: Summary of unit/integration test suites added, test execution results, and build status.

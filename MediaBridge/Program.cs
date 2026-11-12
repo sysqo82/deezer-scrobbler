@@ -1,66 +1,116 @@
 ﻿using System;
-using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Windows.Media.Control;
 
+// Long-lived bridge: connects to GSMTC once, reacts to change events and writes one line per state change.
+// Exits when stdin closes (parent app exited).
 class Program {
-    [STAThread]
+    static GlobalSystemMediaTransportControlsSessionManager? manager;
+    static readonly SemaphoreSlim signal = new(0);
+    static Task<GlobalSystemMediaTransportControlsSessionMediaProperties>? pendingProps;
+    static string? pendingAppId;
+    static volatile bool gaveUpWaiting;
+    static string? lastLine;
+
     static void Main(string[] args) {
-        MainAsync(args).GetAwaiter().GetResult();
-    }
-
-    static async Task MainAsync(string[] args) {
-        using var cts = new CancellationTokenSource(2500);
-        try {
-            var task = GetMediaInfoAsync();
-            if (await Task.WhenAny(task, Task.Delay(2400, cts.Token)) == task) {
-                Console.WriteLine(await task);
-            } else {
-                Console.WriteLine("DEEZER_NOT_FOUND");
-            }
-        } catch (Exception ex) {
-            Console.WriteLine($"ERROR|{ex.Message}");
-        } finally {
+        new Thread(() => {
+            try { while (Console.In.ReadLine() != null) { } } catch { }
             Environment.Exit(0);
+        }) { IsBackground = true }.Start();
+
+        try {
+            Run().GetAwaiter().GetResult();
+        } catch (Exception ex) {
+            Write($"ERROR|{ex.Message}");
+        }
+        Environment.Exit(1);
+    }
+
+    static async Task Run() {
+        var requestTask = GlobalSystemMediaTransportControlsSessionManager.RequestAsync().AsTask();
+        if (await Task.WhenAny(requestTask, Task.Delay(10000)) != requestTask) {
+            Write("ERROR|GSMTC session manager did not respond");
+            return;
+        }
+        manager = await requestTask;
+        manager.SessionsChanged += (_, _) => { Subscribe(); signal.Release(); };
+        Subscribe();
+        signal.Release();
+
+        while (true) {
+            await signal.WaitAsync();
+            await Task.Delay(300); // coalesce bursts of events
+            while (signal.CurrentCount > 0) await signal.WaitAsync();
+            Write(await Evaluate());
         }
     }
 
-    static async Task<string> GetMediaInfoAsync() {
-        var manager = await GlobalSystemMediaTransportControlsSessionManager.RequestAsync();
-        var sessions = manager.GetSessions();
-        foreach (var session in sessions) {
-            var appId = session.SourceAppUserModelId ?? "";
-            var props = await session.TryGetMediaPropertiesAsync();
-            var info = session.GetPlaybackInfo();
-            var status = info?.PlaybackStatus.ToString() ?? "Unknown";
-            var artist = props?.Artist ?? "";
-            var title = props?.Title ?? "";
-            var album = props?.AlbumTitle ?? "";
+    static readonly object subscribeLock = new();
+    static System.Collections.Generic.List<GlobalSystemMediaTransportControlsSession> subscribed = new();
 
+    static void OnPropsChanged(GlobalSystemMediaTransportControlsSession s, MediaPropertiesChangedEventArgs e) => signal.Release();
+    static void OnPlaybackChanged(GlobalSystemMediaTransportControlsSession s, PlaybackInfoChangedEventArgs e) => signal.Release();
+
+    static void Subscribe() {
+        lock (subscribeLock) {
+            foreach (var s in subscribed) {
+                try { s.MediaPropertiesChanged -= OnPropsChanged; s.PlaybackInfoChanged -= OnPlaybackChanged; } catch { }
+            }
+            subscribed = new(manager!.GetSessions());
+            foreach (var s in subscribed) {
+                s.MediaPropertiesChanged += OnPropsChanged;
+                s.PlaybackInfoChanged += OnPlaybackChanged;
+            }
+        }
+    }
+
+    static GlobalSystemMediaTransportControlsSession? FindDeezerSession() {
+        GlobalSystemMediaTransportControlsSession? playing = null;
+        foreach (var s in manager!.GetSessions()) {
+            var appId = s.SourceAppUserModelId ?? "";
             if (appId.Contains("deezer", StringComparison.OrdinalIgnoreCase) ||
-                title.Contains("deezer", StringComparison.OrdinalIgnoreCase) ||
-                artist.Contains("deezer", StringComparison.OrdinalIgnoreCase) ||
                 appId.Contains("electron", StringComparison.OrdinalIgnoreCase)) {
-                return $"DEEZER|{artist}|{title}|{album}|{status}";
+                return s;
+            }
+            if (playing == null && s.GetPlaybackInfo()?.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing) {
+                playing = s;
             }
         }
+        return playing;
+    }
 
-        // Fallback: if any active session is playing, return it
-        foreach (var session in sessions) {
-            var info = session.GetPlaybackInfo();
-            if (info?.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing) {
-                var props = await session.TryGetMediaPropertiesAsync();
-                var status = info.PlaybackStatus.ToString();
-                var artist = props?.Artist ?? "";
-                var title = props?.Title ?? "";
-                var album = props?.AlbumTitle ?? "";
-                if (!string.IsNullOrEmpty(title)) {
-                    return $"DEEZER|{artist}|{title}|{album}|{status}";
-                }
-            }
+    static async Task<string> Evaluate() {
+        var session = FindDeezerSession();
+        if (session == null) return "DEEZER_NOT_FOUND";
+
+        // Never issue a second properties request to a session while a previous one is still unanswered.
+        var appId = session.SourceAppUserModelId ?? "";
+        if (pendingProps == null || pendingAppId != appId) {
+            pendingProps = session.TryGetMediaPropertiesAsync().AsTask();
+            pendingAppId = appId;
+            gaveUpWaiting = false;
+            // Re-evaluate once a slow reply finally arrives (only if we stopped waiting for it).
+            _ = pendingProps.ContinueWith(_ => { if (gaveUpWaiting) signal.Release(); });
         }
+        if (await Task.WhenAny(pendingProps, Task.Delay(5000)) != pendingProps) {
+            gaveUpWaiting = true;
+            return lastLine ?? "DEEZER_NOT_FOUND";
+        }
+        var propsTask = pendingProps;
+        pendingProps = null;
+        pendingAppId = null;
+        if (propsTask.IsFaulted) return lastLine ?? "DEEZER_NOT_FOUND";
 
-        return "DEEZER_NOT_FOUND";
+        var props = propsTask.Result;
+        var status = session.GetPlaybackInfo()?.PlaybackStatus.ToString() ?? "Unknown";
+        return $"DEEZER|{props?.Artist ?? ""}|{props?.Title ?? ""}|{props?.AlbumTitle ?? ""}|{status}";
+    }
+
+    static void Write(string line) {
+        if (line == lastLine) return;
+        lastLine = line;
+        Console.WriteLine(line);
+        Console.Out.Flush();
     }
 }
