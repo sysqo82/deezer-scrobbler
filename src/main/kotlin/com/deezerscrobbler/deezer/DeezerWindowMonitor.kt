@@ -145,12 +145,8 @@ class DeezerWindowMonitor {
                 if (length > 0) {
                     val title = String(buffer, 0, length).trim()
                     val processName = getProcessName(hwnd)
-                    val isDeezerProcess = processName.equals("Deezer.exe", ignoreCase = true)
-                    val hasDeezerTitle = title.endsWith(" - Deezer", ignoreCase = true) || 
-                                         title.equals("Deezer", ignoreCase = true) || 
-                                         title.startsWith("Deezer - ", ignoreCase = true)
-
-                    if (isDeezerProcess || hasDeezerTitle) {
+                    // Only the Deezer desktop app; browser windows with "Deezer" in the title are ignored.
+                    if (processName.equals("Deezer.exe", ignoreCase = true)) {
                         deezerProcessFound = true
                         if (title.isNotBlank() && !candidates.contains(title)) {
                             candidates.add(title)

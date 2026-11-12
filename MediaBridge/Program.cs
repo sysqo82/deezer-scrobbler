@@ -65,19 +65,14 @@ class Program {
         }
     }
 
+    // Only the Deezer desktop app (appId e.g. "Deezer.exe"). Browsers (Deezer web, YouTube) report their own appId and are ignored.
     static GlobalSystemMediaTransportControlsSession? FindDeezerSession() {
-        GlobalSystemMediaTransportControlsSession? playing = null;
         foreach (var s in manager!.GetSessions()) {
-            var appId = s.SourceAppUserModelId ?? "";
-            if (appId.Contains("deezer", StringComparison.OrdinalIgnoreCase) ||
-                appId.Contains("electron", StringComparison.OrdinalIgnoreCase)) {
+            if ((s.SourceAppUserModelId ?? "").Contains("deezer", StringComparison.OrdinalIgnoreCase)) {
                 return s;
             }
-            if (playing == null && s.GetPlaybackInfo()?.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing) {
-                playing = s;
-            }
         }
-        return playing;
+        return null;
     }
 
     static async Task<string> Evaluate() {
