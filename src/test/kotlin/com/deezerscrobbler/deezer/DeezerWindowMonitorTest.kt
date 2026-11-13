@@ -53,7 +53,8 @@ class DeezerWindowMonitorTest {
         override fun getInputStream(): InputStream = source
         override fun getErrorStream(): InputStream = InputStream.nullInputStream()
         override fun waitFor(): Int { while (alive) Thread.sleep(10); return 0 }
-        override fun exitValue(): Int = if (alive) throw IllegalThreadStateException() else 0
+        var code = 0
+        override fun exitValue(): Int = if (alive) throw IllegalThreadStateException() else code
         override fun isAlive(): Boolean = alive
         override fun destroy() = kill()
     }
@@ -105,6 +106,16 @@ class DeezerWindowMonitorTest {
         monitor.bridgeStarter = { FakeBridgeProcess() }
         monitor.pollViaMediaBridge(false)
         assertEquals(2, monitor.bridgeStartCount)
+    }
+
+    @Test
+    fun testBridgeExitCode() {
+        val exited = FakeBridgeProcess().apply { code = 2; kill() }
+        assertEquals("2", monitor.bridgeExitCode(exited))
+
+        val running = FakeBridgeProcess()
+        assertEquals("still_running", monitor.bridgeExitCode(running))
+        running.kill()
     }
 
     @Test

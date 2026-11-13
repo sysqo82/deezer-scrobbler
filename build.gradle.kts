@@ -12,7 +12,7 @@ kotlin {
 }
 
 group = "com.deezerscrobbler"
-version = "1.3.15"
+version = "1.3.16"
 
 repositories {
     mavenCentral()
@@ -123,7 +123,7 @@ compose.desktop {
                 TargetFormat.Exe
             )
             packageName = "DeezerScrobbler"
-            packageVersion = "1.3.15"
+            packageVersion = "1.3.16"
             windows {
                 menuGroup = "Deezer Scrobbler"
                 upgradeUuid = "6d3a9f14-7221-4d1e-84b2-a4f107f9c9b1"

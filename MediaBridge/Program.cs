@@ -24,7 +24,7 @@ class Program {
         } catch (Exception ex) {
             Write($"ERROR|{ex.Message}");
         }
-        Environment.Exit(1);
+        Environment.Exit(2); // 2 = bridge error (1 is what taskkill /f produces)
     }
 
     static async Task Run() {
