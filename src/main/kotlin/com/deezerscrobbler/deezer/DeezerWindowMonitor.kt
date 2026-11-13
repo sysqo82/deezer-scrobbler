@@ -12,6 +12,7 @@ import com.sun.jna.platform.win32.WinNT
 import com.sun.jna.ptr.IntByReference
 import java.io.File
 import java.io.InputStream
+import java.util.concurrent.TimeUnit
 
 data class DetectionResult(
     val state: PlaybackState,
@@ -90,9 +91,17 @@ class DeezerWindowMonitor {
             } catch (_: Exception) {
             }
             latestBridgeLine = null
-            FileLogger.warn("DeezerWindowMonitor", "MediaBridge exited", metadata = mapOf("fallback" to "JNA window polling"))
+            FileLogger.warn(
+                "DeezerWindowMonitor",
+                "MediaBridge exited",
+                metadata = mapOf("exit_code" to bridgeExitCode(process), "fallback" to "JNA window polling")
+            )
         }, "MediaBridge-Reader").apply { isDaemon = true }.start()
     }
+
+    // 0 = parent closed stdin, 2 = bridge reported ERROR|, 1 = killed (e.g. taskkill /f), other = crash code.
+    internal fun bridgeExitCode(process: Process): String =
+        if (process.waitFor(2, TimeUnit.SECONDS)) process.exitValue().toString() else "still_running"
 
     private fun startBridge(): Process? {
         val exe = extractedBridgeFile ?: return null
